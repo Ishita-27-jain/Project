@@ -9,6 +9,9 @@ import lightgbm as lgb
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, confusion_matrix, precision_score, recall_score
 from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import StandardScaler, LabelEncoder, PolynomialFeatures
+from sklearn.linear_model import LogisticRegression
+import shap
 
 # Dataset
 data_path = r"C:\Users\ishit\Downloads\hospital_readmissions\hospital_readmissions_modified.csv"
@@ -114,3 +117,118 @@ plt.xticks(rotation=0)
 plt.legend(loc="best")
 plt.grid(axis="y", linestyle="--", alpha=0.7)
 plt.show()
+
+# After model predictions and before polynomial features generation
+# Add Feature Importance Analysis
+plt.figure(figsize=(12, 6))
+feature_imp = pd.DataFrame({
+    'Feature': X.columns,  # Use original X instead of X_train
+    'LightGBM': lgb_model.feature_importance(),
+    'Random Forest': rf_model.feature_importances_
+})
+
+# Create subplots
+plt.subplot(1, 2, 1)
+feature_imp.nlargest(15, 'LightGBM').plot(
+    x='Feature', y='LightGBM', kind='barh',
+    title='Top 15 Features (LightGBM)'
+)
+
+plt.subplot(1, 2, 2)
+feature_imp.nlargest(15, 'Random Forest').plot(
+    x='Feature', y='Random Forest', kind='barh',
+    title='Top 15 Features (Random Forest)'
+)
+
+plt.tight_layout()
+plt.show()
+
+poly = PolynomialFeatures(degree=2, interaction_only=True)
+numerical_features = df.select_dtypes(include=['int64', 'float64']).columns
+interaction_features = pd.DataFrame(
+    poly.fit_transform(df[numerical_features]),
+    columns=poly.get_feature_names_out(numerical_features)  # Updated this line
+)
+df = pd.concat([df, interaction_features.iloc[:, len(numerical_features)+1:]], axis=1)
+
+# Then continue with the train-test split
+X = df.drop(columns=['readmitted_binary'])
+y = df['readmitted_binary']
+
+# Add time-based features if admission_date exists
+if 'admission_date' in df.columns:
+    df['admission_date'] = pd.to_datetime(df['admission_date'])
+    df['admission_day_of_week'] = df['admission_date'].dt.dayofweek
+    df['admission_month'] = df['admission_date'].dt.month
+    df['is_weekend'] = df['admission_day_of_week'].isin([5, 6]).astype(int)
+
+# ... continue with existing preprocessing code until after model predictions ...
+
+# After both models' predictions, add stacking
+meta_features = pd.DataFrame({
+    'lgb_pred': y_pred_proba_lgb,
+    'rf_pred': y_pred_proba_rf
+})
+
+meta_classifier = LogisticRegression()
+meta_classifier.fit(meta_features, y_test)
+
+final_predictions = meta_classifier.predict(meta_features)
+final_probabilities = meta_classifier.predict_proba(meta_features)[:, 1]
+
+# Update results DataFrame to include stacked model
+results = pd.DataFrame({
+    "Model": ["LightGBM", "Random Forest", "Stacked Model"],
+    "Accuracy": [
+        accuracy_score(y_test, y_pred_lgb),
+        accuracy_score(y_test, y_pred_rf),
+        accuracy_score(y_test, final_predictions)
+    ],
+    "AUC-ROC": [
+        roc_auc_score(y_test, y_pred_proba_lgb),
+        roc_auc_score(y_test, y_pred_proba_rf),
+        roc_auc_score(y_test, final_probabilities)
+    ],
+    "Precision": [
+        precision_score(y_test, y_pred_lgb),
+        precision_score(y_test, y_pred_rf),
+        precision_score(y_test, final_predictions)
+    ],
+    "Recall": [
+        recall_score(y_test, y_pred_lgb),
+        recall_score(y_test, y_pred_rf),
+        recall_score(y_test, final_predictions)
+    ]
+})
+
+# ... existing performance comparison code ...
+# Add Risk Score Analysis
+def calculate_risk_score(probabilities):
+    return pd.cut(probabilities, 
+                 bins=[0, 0.2, 0.4, 0.6, 0.8, 1],
+                 labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'])
+
+risk_scores = pd.DataFrame({
+    'LightGBM Risk': calculate_risk_score(y_pred_proba_lgb),
+    'Random Forest Risk': calculate_risk_score(y_pred_proba_rf),
+    'Stacked Model Risk': calculate_risk_score(final_probabilities)
+})
+
+plt.figure(figsize=(15, 5))
+for i, col in enumerate(risk_scores.columns):
+    plt.subplot(1, 3, i+1)
+    risk_scores[col].value_counts().plot(kind='pie', autopct='%1.1f%%')
+    plt.title(f'{col} Distribution')
+plt.tight_layout()
+plt.show()
+
+# Calculate potential cost savings
+avg_readmission_cost = 10000  # Example cost in dollars
+predicted_prevented = sum((y_test == 1) & (final_predictions == 0))
+potential_savings = predicted_prevented * avg_readmission_cost
+print(f"Potential cost savings: ${potential_savings:,}")
+
+# Add SHAP values analysis for model interpretability
+explainer = shap.TreeExplainer(lgb_model)
+shap_values = explainer.shap_values(X_test)
+shap.summary_plot(shap_values, X_test)
