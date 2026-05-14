@@ -1,0 +1,164 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import ttest_ind
+from colorama import Fore, Style, init
+from statsmodels.stats.multitest import multipletests
+import matplotlib.pyplot as plt
+
+
+# initialize colorama
+init(autoreset=True)
+
+# ============================
+# LOAD DATA
+# ============================
+df = pd.read_csv(r"C:\Users\ishit\OneDrive\Desktop\BRCA Project\Datasets\cleaned_expression.csv")
+
+print(Fore.CYAN + "\n================ DATA PREVIEW ================\n")
+print(df.head())
+print("\nShape:", df.shape)
+
+# ============================
+# SEPARATE LABELS
+# ============================
+labels = df["Response"]
+df = df.drop(columns=["Response", "Unnamed: 0"])
+df = np.log2(df + 1)
+
+print(Fore.GREEN + "\n================ CLEANED DATA ================\n")
+print("Expression shape:", df.shape)
+
+print(Fore.YELLOW + "\nLabels preview:\n")
+print(labels.head())
+
+# ============================
+# SPLIT GROUPS
+# ============================
+group_1 = df[labels == 1]
+group_0 = df[labels == 0]
+
+print(Fore.MAGENTA + "\n================ GROUP SPLIT ================\n")
+print("Responders shape:", group_1.shape)
+print("Non-responders shape:", group_0.shape)
+
+# ============================
+# MEAN EXPRESSION
+# ============================
+mean_1 = group_1.mean(axis=0)
+mean_0 = group_0.mean(axis=0)
+
+results = pd.DataFrame({
+    "Gene": df.columns,
+    "Responder_mean": mean_1.values,
+    "NonResponder_mean": mean_0.values
+})
+
+print(Fore.BLUE + "\n================ MEAN EXPRESSION ================\n")
+print(results.head())
+
+# ============================
+# T-TEST (STATISTICS)
+# ============================
+p_values = []
+
+for gene in df.columns:
+    t_stat, p_val = ttest_ind(group_1[gene], group_0[gene], nan_policy='omit')
+    p_values.append(p_val)
+
+results["p_value"] = p_values
+results = results.dropna(subset=["p_value"])
+
+print(Fore.RED + "\n================ T-TEST RESULTS ================\n")
+print(results.head())
+
+# ============================
+# LOG2 FOLD CHANGE
+# ============================
+results["log2FC"] = np.log2(
+    (results["Responder_mean"] + 1) / (results["NonResponder_mean"] + 1)
+)
+
+print(Fore.CYAN + "\n========== LOG2 FOLD CHANGE ==========\n")
+print(results[["Gene", "log2FC"]].head())
+
+
+
+# ============================
+# FDR CORRECTION
+# ============================
+_, adj_p_values, _, _ = multipletests(results["p_value"], method='fdr_bh')
+results["adj_p_value"] = adj_p_values
+
+print(Fore.GREEN + "\n========== FDR CORRECTION ==========\n")
+print(results[["Gene", "p_value", "adj_p_value"]].head())
+
+
+# ============================
+# SIGNIFICANT GENES
+# ============================
+significant = results[
+    (results["adj_p_value"] < 0.05) & (abs(results["log2FC"]) > 1)
+]
+
+print(Fore.RED + "\n========== SIGNIFICANT GENES ==========\n")
+
+if len(significant) == 0:
+    print(Fore.YELLOW + "No significant genes found with current threshold.")
+else:
+    print(significant.head())
+
+# ==============================
+# VOLCANO PLOT
+# ==============================
+
+# Remove NaN just in case
+results = results.dropna(subset=["adj_p_value", "log2FC"])
+
+# Create -log10(p-value)
+results["neg_log10_p"] = -np.log10(results["adj_p_value"])
+
+# Define thresholds
+p_thresh = 0.05
+fc_thresh = 1
+
+# Create categories
+results["Significance"] = "Not Significant"
+
+results.loc[
+    (results["adj_p_value"] < p_thresh) & (results["log2FC"] > fc_thresh),
+    "Significance"
+] = "Upregulated"
+
+results.loc[
+    (results["adj_p_value"] < p_thresh) & (results["log2FC"] < -fc_thresh),
+    "Significance"
+] = "Downregulated"
+
+# Plot
+plt.figure(figsize=(8,6))
+
+# Plot each category separately
+for label, color in zip(
+    ["Not Significant", "Upregulated", "Downregulated"],
+    ["gray", "red", "blue"]
+):
+    subset = results[results["Significance"] == label]
+    plt.scatter(
+        subset["log2FC"],
+        subset["neg_log10_p"],
+        label=label,
+        alpha=0.7
+    )
+
+# Threshold lines
+plt.axhline(-np.log10(p_thresh), linestyle="--")
+plt.axvline(fc_thresh, linestyle="--")
+plt.axvline(-fc_thresh, linestyle="--")
+
+# Labels
+plt.xlabel("log2 Fold Change")
+plt.ylabel("-log10 Adjusted p-value")
+plt.title("Volcano Plot")
+plt.legend()
+
+plt.show()
